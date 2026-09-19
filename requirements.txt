@@ -1,0 +1,12 @@
+﻿# app runtime
+shiny==1.7.0
+plotly==7.1.0
+pandas==3.0.5
+numpy==2.5.1
+
+# data/build_data.py only (not needed in the container)
+# duckdb==1.5.5
+# openpyxl==3.1.5
+# smoke_test.py only (not needed in the container)
+# websockets>=12
+# requests
