@@ -95,21 +95,31 @@ def long() -> pd.DataFrame:
     One row per county / month / template row, restricted to reported months.
     Adds `case` (probation / supervision / cus / informal / other) and `level` (max /
     med / min / unclassified) parsed from the classification-of-caseload metrics.
+
+    Startup cost matters (the free hosting tier has a sliver of a CPU), so the parsing is
+    done once per distinct metric on the wide table and the dates are built arithmetically
+    rather than with to_datetime over 2.8M rows.
     """
-    df = wide().melt(id_vars=["county", "circuit", "year", "section", "breakdown", "metric", "subgroup"],
-                     value_vars=MONTH_COLS, var_name="month", value_name="value")
+    w = wide()
+    # 'probation max', 'cus unclassified' -> case + level; elsewhere the metric itself may be a case type
+    metrics = pd.Series(w["metric"].cat.categories, index=w["metric"].cat.categories).astype(str)
+    case_of = metrics.str.extract(r"^(probation|supervision|cus|informal|other)\b")[0]
+    level_of = metrics.str.extract(r"(max|med|min|unclassified)$")[0]
+    pop = w["section"] == "population"
+    m = w["metric"].astype(str)
+    case = pd.Series(case_of.reindex(m).values, index=w.index).where(pop, m.where(m.isin(CASE_ORDER)))
+    level = pd.Series(level_of.reindex(m).values, index=w.index).where(pop)
+    w = w.assign(case=case.astype("category"), level=level.astype("category"))
+
+    df = w.melt(id_vars=["county", "circuit", "year", "section", "breakdown", "metric", "subgroup", "case", "level"],
+                value_vars=MONTH_COLS, var_name="month", value_name="value")
     df["month"] = df["month"].str[1:].astype(int)
     last = df["year"].map(meta()["last_month"]).fillna(12)
-    df = df.loc[df["month"] <= last]
-    df["date"] = pd.to_datetime(dict(year=df["year"], month=df["month"], day=1))
-
-    # 'probation max', 'cus unclassified' -> case + level; elsewhere the metric itself may be a case type
-    m = df["metric"].astype(str)
-    pop = df["section"] == "population"
-    case = m.str.extract(r"^(probation|supervision|cus|informal|other)\b")[0]
-    lvl = m.str.extract(r"(max|med|min|unclassified)$")[0]
-    df["case"] = case.where(pop, m.where(m.isin(CASE_ORDER))).astype("category")
-    df["level"] = lvl.where(pop).astype("category")
+    df = df.loc[df["month"] <= last].copy()
+    df["date"] = ((df["year"].to_numpy() - 1970).astype("datetime64[Y]")
+                  + (df["month"].to_numpy() - 1).astype("timedelta64[M]")).astype("datetime64[ns]")
+    df["case"] = df["case"].astype("category")
+    df["level"] = df["level"].astype("category")
     return df
 
 
