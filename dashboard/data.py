@@ -3,6 +3,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -92,34 +93,40 @@ def wide() -> pd.DataFrame:
 @lru_cache
 def long() -> pd.DataFrame:
     """
-    One row per county / month / template row, restricted to reported months.
-    Adds `case` (probation / supervision / cus / informal / other) and `level` (max /
-    med / min / unclassified) parsed from the classification-of-caseload metrics.
+    One row per county / month / template row *with a non-zero value*, restricted to
+    reported months. Adds `case` (probation / supervision / cus / informal / other) and `level` (max / med / min /
+    unclassified) parsed from the classification-of-caseload metrics.
 
-    Startup cost matters (the free hosting tier has a sliver of a CPU), so the parsing is
-    done once per distinct metric on the wide table and the dates are built arithmetically
-    rather than with to_datetime over 2.8M rows.
+    Every consumer aggregates with sums, so zero and blank cells carry nothing and are
+    left out: that keeps the table at a fraction of the melted size, which matters on the
+    free hosting tier (512 MB, a sliver of a CPU). Metrics are parsed once per distinct
+    value, dates are built arithmetically, and the numeric columns are downcast.
     """
     w = wide()
     # 'probation max', 'cus unclassified' -> case + level; elsewhere the metric itself may be a case type
     metrics = pd.Series(w["metric"].cat.categories, index=w["metric"].cat.categories).astype(str)
-    case_of = metrics.str.extract(r"^(probation|supervision|cus|informal|other)\b")[0]
+    group_of = metrics.str.extract(r"^(probation|supervision|cus|informal|other)\b")[0]
     level_of = metrics.str.extract(r"(max|med|min|unclassified)$")[0]
     pop = w["section"] == "population"
     m = w["metric"].astype(str)
-    case = pd.Series(case_of.reindex(m).values, index=w.index).where(pop, m.where(m.isin(CASE_ORDER)))
+    group = pd.Series(group_of.reindex(m).values, index=w.index).where(pop, m.where(m.isin(CASE_ORDER)))
     level = pd.Series(level_of.reindex(m).values, index=w.index).where(pop)
-    w = w.assign(case=case.astype("category"), level=level.astype("category"))
 
-    df = w.melt(id_vars=["county", "circuit", "year", "section", "breakdown", "metric", "subgroup", "case", "level"],
-                value_vars=MONTH_COLS, var_name="month", value_name="value")
-    df["month"] = df["month"].str[1:].astype(int)
+    # non-zero cells only: row index into the wide table + month, without ever melting
+    vals = w[MONTH_COLS].to_numpy(dtype="float32")
+    rows, cols = np.nonzero(np.isfinite(vals) & (vals != 0))
+    df = w.iloc[rows][["county", "circuit", "year", "section", "breakdown", "metric", "subgroup"]].reset_index(drop=True)
+    df["case"] = pd.Categorical(group.to_numpy()[rows])
+    df["level"] = pd.Categorical(level.to_numpy()[rows])
+    df["month"] = (cols + 1).astype("int8")
+    df["value"] = vals[rows, cols]
+    df["year"] = df["year"].astype("int16")
+    df["circuit"] = df["circuit"].astype("int8")
+
     last = df["year"].map(meta()["last_month"]).fillna(12)
-    df = df.loc[df["month"] <= last].copy()
-    df["date"] = ((df["year"].to_numpy() - 1970).astype("datetime64[Y]")
-                  + (df["month"].to_numpy() - 1).astype("timedelta64[M]")).astype("datetime64[ns]")
-    df["case"] = df["case"].astype("category")
-    df["level"] = df["level"].astype("category")
+    df = df.loc[df["month"] <= last].reset_index(drop=True)
+    df["date"] = ((df["year"].to_numpy().astype("int64") - 1970).astype("datetime64[Y]")
+                  + (df["month"].to_numpy().astype("int64") - 1).astype("timedelta64[M]")).astype("datetime64[ns]")
     return df
 
 
